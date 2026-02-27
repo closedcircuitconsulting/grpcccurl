@@ -1,0 +1,94 @@
+name: gRPCCCurl Container
+on:
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: grpcccurl
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+  REGISTRY_USER: ${{ github.actor }}
+  REGISTRY_PASSWORD: ${{ github.token }}
+
+
+jobs:
+  check-upstream:
+    name: Check upstream version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.upstream.outputs.version }}
+      should_build: ${{ steps.compare.outputs.should_build }}
+
+    steps:
+    - name: Get latest upstream release
+      id: upstream
+      run: |
+        VERSION=$(curl -s https://api.github.com/repos/fullstorydev/grpcurl/releases/latest | jq -r '.tag_name' | sed 's/^v//')
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Upstream version: ${VERSION}"
+
+    - name: Check if version is already published
+      id: compare
+      run: |
+        UPSTREAM="${{ steps.upstream.outputs.version }}"
+        STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+          -H "Authorization: Bearer ${{ github.token }}" \
+          "https://ghcr.io/v2/${{ github.repository_owner }}/grpcccurl/manifests/${UPSTREAM}")
+
+        if [[ "${STATUS}" == "200" ]]; then
+          echo "should_build=false" >> $GITHUB_OUTPUT
+          echo "Already published ${UPSTREAM}, skipping"
+        else
+          echo "should_build=true" >> $GITHUB_OUTPUT
+          echo "Version ${UPSTREAM} not yet published, will build"
+        fi
+
+  build-and-push:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Install QEMU dependency
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-user-static
+
+    - name: Build image
+      id: build_image
+      uses: redhat-actions/buildah-build@v2
+      with:
+        image: ${{ env.IMAGE_NAME }}
+        tags: ${{ needs.check-upstream.outputs.version }} latest
+        archs: amd64, arm64, arm/v7
+        build-args: |
+          VERSION=${{ needs.check-upstream.outputs.version }}
+        containerfiles: |
+          ./Containerfile
+        labels: |
+          org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          org.opencontainers.image.description=grpcccurl container (upstream fullstorydev/grpcurl)
+          org.opencontainers.image.licenses=MIT
+          org.opencontainers.image.version=${{ needs.check-upstream.outputs.version }}
+
+    - name: Push to GHCR
+      uses: redhat-actions/push-to-registry@v2
+      id: push
+      with:
+        image: ${{ steps.build_image.outputs.image }}
+        tags: ${{ steps.build_image.outputs.tags }}
+        registry: ${{ env.IMAGE_REGISTRY }}
+        username: ${{ env.REGISTRY_USER }}
+        password: ${{ env.REGISTRY_PASSWORD }}
+
+    - name: Echo outputs
+      run: |
+        echo "${{ toJSON(steps.push.outputs) }}"
