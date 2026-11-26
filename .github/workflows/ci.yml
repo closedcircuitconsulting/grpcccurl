@@ -1,6 +1,16 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Closed Circuit Consulting
+
 name: gRPCCCurl Container
 on:
+  schedule:
+    - cron: '17 6 * * *'
   workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if the version is already published
+        type: boolean
+        default: false
 
 env:
   IMAGE_NAME: grpcccurl
@@ -8,11 +18,13 @@ env:
   REGISTRY_USER: ${{ github.actor }}
   REGISTRY_PASSWORD: ${{ github.token }}
 
-
 jobs:
   check-upstream:
     name: Check upstream version
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     outputs:
       version: ${{ steps.upstream.outputs.version }}
       should_build: ${{ steps.compare.outputs.should_build }}
@@ -20,25 +32,34 @@ jobs:
     steps:
     - name: Get latest upstream release
       id: upstream
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
-        VERSION=$(curl -s https://api.github.com/repos/fullstorydev/grpcurl/releases/latest | jq -r '.tag_name' | sed 's/^v//')
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        TAG=$(gh release view --repo fullstorydev/grpcurl --json tagName --jq .tagName)
+        VERSION="${TAG#v}"
+        if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "Unexpected upstream tag: ${TAG}" >&2
+          exit 1
+        fi
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
         echo "Upstream version: ${VERSION}"
 
     - name: Check if version is already published
       id: compare
+      env:
+        VERSION: ${{ steps.upstream.outputs.version }}
+        FORCE: ${{ inputs.force }}
       run: |
-        UPSTREAM="${{ steps.upstream.outputs.version }}"
-        STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-          -H "Authorization: Bearer ${{ github.token }}" \
-          "https://ghcr.io/v2/${{ github.repository_owner }}/grpcccurl/manifests/${UPSTREAM}")
-
-        if [[ "${STATUS}" == "200" ]]; then
-          echo "should_build=false" >> $GITHUB_OUTPUT
-          echo "Already published ${UPSTREAM}, skipping"
+        if [[ "${FORCE}" == "true" ]]; then
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+          echo "Forced rebuild of ${VERSION}"
+        elif skopeo inspect --raw --creds "${REGISTRY_USER}:${REGISTRY_PASSWORD}" \
+            "docker://${IMAGE_REGISTRY}/${IMAGE_NAME}:${VERSION}" > /dev/null 2>&1; then
+          echo "should_build=false" >> "$GITHUB_OUTPUT"
+          echo "Already published ${VERSION}, skipping"
         else
-          echo "should_build=true" >> $GITHUB_OUTPUT
-          echo "Version ${UPSTREAM} not yet published, will build"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+          echo "Version ${VERSION} not yet published, will build"
         fi
 
   build-and-push:
@@ -50,42 +71,35 @@ jobs:
     permissions:
       contents: read
       packages: write
-      attestations: write
-      id-token: write
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v5
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-    - name: Install QEMU dependency
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y qemu-user-static
+    - name: Get build timestamp
+      id: timestamp
+      run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
     - name: Build image
       id: build_image
-      uses: redhat-actions/buildah-build@v2
+      uses: redhat-actions/buildah-build@719e3c40d8af9790c23eca13f7daa339f2867034 # v3.1.0
       with:
-        image: ${{ env.IMAGE_NAME }}
-        tags: ${{ needs.check-upstream.outputs.version }} latest
+        tags: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.check-upstream.outputs.version }} ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest
         archs: amd64, arm64, arm/v7
         build-args: |
           VERSION=${{ needs.check-upstream.outputs.version }}
         containerfiles: |
           ./Containerfile
         labels: |
-          org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          org.opencontainers.image.description=grpcccurl container (upstream fullstorydev/grpcurl)
-          org.opencontainers.image.licenses=MIT
           org.opencontainers.image.version=${{ needs.check-upstream.outputs.version }}
+          org.opencontainers.image.created=${{ steps.timestamp.outputs.created }}
+          org.opencontainers.image.revision=${{ github.sha }}
 
     - name: Push to GHCR
-      uses: redhat-actions/push-to-registry@v2
+      uses: redhat-actions/push-to-registry@94ade333c38ecc0e60e94785125d9a52ca423b37 # v3.0.0
       id: push
       with:
-        image: ${{ steps.build_image.outputs.image }}
         tags: ${{ steps.build_image.outputs.tags }}
-        registry: ${{ env.IMAGE_REGISTRY }}
         username: ${{ env.REGISTRY_USER }}
         password: ${{ env.REGISTRY_PASSWORD }}
 
