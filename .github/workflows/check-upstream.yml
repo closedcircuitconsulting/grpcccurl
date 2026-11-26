@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Closed Circuit Consulting
+
+name: Check upstream grpcurl
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: Open PR if upstream has a new release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        TAG=$(gh release view --repo fullstorydev/grpcurl --json tagName --jq .tagName)
+        LATEST="${TAG#v}"
+        if [[ ! "${LATEST}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "Unexpected upstream tag: ${TAG}" >&2
+          exit 1
+        fi
+
+        CURRENT=$(sed -n 's/^ARG GRPCURL_VERSION=//p' Containerfile)
+        if [[ "${LATEST}" == "${CURRENT}" ]]; then
+          echo "Up to date (${CURRENT})"
+          exit 0
+        fi
+
+        BRANCH="update-grpcurl-${LATEST}"
+        if git ls-remote --exit-code --heads origin "${BRANCH}" > /dev/null; then
+          echo "Branch ${BRANCH} already exists, skipping"
+          exit 0
+        fi
+
+        git config user.name "github-actions[bot]"
+        git config user.email "41898237+github-actions[bot]@users.noreply.github.com"
+        git switch -c "${BRANCH}"
+        sed -i "s/^ARG GRPCURL_VERSION=.*/ARG GRPCURL_VERSION=${LATEST}/" Containerfile
+        git commit -am "Update grpcurl to ${LATEST}"
+        git push origin "${BRANCH}"
+        gh pr create \
+          --title "Update grpcurl to ${LATEST}" \
+          --body "Upstream release: https://github.com/fullstorydev/grpcurl/releases/tag/v${LATEST}"

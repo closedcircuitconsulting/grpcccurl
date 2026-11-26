@@ -1,40 +1,40 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Closed Circuit Consulting
 
-FROM --platform=$BUILDPLATFORM docker.io/library/alpine:3.24 AS fetch
+ARG GRPCURL_VERSION=1.9.4
 
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.27.4-alpine3.24 AS build
+
+ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
-ARG VERSION
+ARG GRPCURL_VERSION
 
-WORKDIR /tmp
+ENV CGO_ENABLED=0 \
+    GOFLAGS=-trimpath \
+    GOWORK=off
 
 RUN set -eu; \
-    : "${VERSION:?VERSION build arg is required}"; \
-    case "${TARGETARCH}/${TARGETVARIANT}" in \
-      amd64/*) GRPC_ARCH=x86_64 ;; \
-      arm64/*) GRPC_ARCH=arm64 ;; \
-      arm/v7)  GRPC_ARCH=armv7 ;; \
-      *) echo "unsupported platform: ${TARGETARCH}/${TARGETVARIANT}" >&2; exit 1 ;; \
-    esac; \
-    BASE="https://github.com/fullstorydev/grpcurl/releases/download/v${VERSION}"; \
-    FILE="grpcurl_${VERSION}_linux_${GRPC_ARCH}.tar.gz"; \
-    wget -q "${BASE}/${FILE}"; \
-    wget -q "${BASE}/grpcurl_${VERSION}_checksums.txt"; \
-    grep " ${FILE}\$" "grpcurl_${VERSION}_checksums.txt" | sha256sum -c -; \
-    tar --no-same-owner -xzf "${FILE}" grpcurl LICENSE
+    GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" GOARM="${TARGETVARIANT#v}" \
+        go install -ldflags "-s -w -X main.version=v${GRPCURL_VERSION}" \
+        "github.com/fullstorydev/grpcurl/cmd/grpcurl@v${GRPCURL_VERSION}"; \
+    find /go/bin -type f -name grpcurl -exec cp {} /grpcurl \; ; \
+    test -x /grpcurl; \
+    cp "/go/pkg/mod/github.com/fullstorydev/grpcurl@v${GRPCURL_VERSION}/LICENSE" /LICENSE
 
 FROM scratch
+ARG GRPCURL_VERSION
 LABEL org.opencontainers.image.title="grpcccurl"
-LABEL org.opencontainers.image.description="grpcccurl container (upstream fullstorydev/grpcurl)"
+LABEL org.opencontainers.image.description="grpcurl built from source by Closed Circuit Consulting (upstream fullstorydev/grpcurl)"
 LABEL org.opencontainers.image.vendor="Closed Circuit Consulting"
 LABEL org.opencontainers.image.authors="unitexe"
 LABEL org.opencontainers.image.licenses="MIT"
 LABEL org.opencontainers.image.source="https://git.closedcircuitconsulting.com/grpcccurl"
 LABEL org.opencontainers.image.url="https://git.closedcircuitconsulting.com"
+LABEL com.closedcircuitconsulting.upstream.version="${GRPCURL_VERSION}"
 LABEL maintainer="unitexe"
-COPY --from=fetch /tmp/LICENSE /usr/share/licenses/grpcurl/LICENSE
-COPY --from=fetch /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=fetch /tmp/grpcurl /usr/local/bin/grpcurl
+COPY --from=build /LICENSE /usr/share/licenses/grpcurl/LICENSE
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /grpcurl /usr/local/bin/grpcurl
 USER 65534:65534
 ENTRYPOINT ["/usr/local/bin/grpcurl"]
